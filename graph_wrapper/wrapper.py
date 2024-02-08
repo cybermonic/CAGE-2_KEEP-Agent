@@ -1,0 +1,80 @@
+
+import torch 
+from CybORG.Agents.Wrappers.BlueTableWrapper import BlueTableWrapper
+from CybORG.Agents.Wrappers.ChallengeWrapper import ChallengeWrapper
+from CybORG.Agents.Wrappers.EnumActionWrapper import EnumActionWrapper
+from CybORG.Agents.Wrappers.OpenAIGymWrapper import OpenAIGymWrapper
+from CybORG.Shared.Actions.Action import Sleep
+
+from graph_wrapper.observation_graph import ObservationGraph
+
+class GraphWrapper(ChallengeWrapper):
+    def __init__(self, agent_name: str, env, agent=None, reward_threshold=None, max_steps=None):
+        super().__init__(agent_name, env, agent, reward_threshold, max_steps)
+        self.agent_name = agent_name
+        
+        # Need to keep the original environment before wrapping it 
+        self.original_env = env 
+        env = BlueTableWrapper(env, output_mode='vector')
+        
+        # Need to keep track of some intermediate variables 
+        env = EnumActionWrapper(env)
+        env.get_action_space('Blue')
+        self.possible_actions = env.possible_actions
+
+        env = OpenAIGymWrapper(agent_name=agent_name, env=env)
+
+        self.graph = ObservationGraph()
+
+        self.env = env
+        self.action_space = self.env.action_space
+        self.observation_space = self.env.observation_space
+        self.reward_threshold = reward_threshold
+        self.max_steps = max_steps
+        self.step_counter = None
+        self.last_obs = None
+
+    def step(self, action=None, include_names=False, include_success=False):
+        # Gets the info from the tabular wrapper (4 dims per host, in order)
+        obs, reward, done, info = super().step(action)
+        
+        # Tell ObservationGraph what happened and update 
+        action = Sleep() if action is None else self.possible_actions[action]
+        dict_obs = self.original_env.get_observation(self.agent_name)
+        success = dict_obs.get('success', 'UNK')
+        self.graph.parse_observation(action, dict_obs)
+        
+        # Get graph data/update the state of the graph 
+        resp = self.graph.get_state(include_names=include_names)
+        if include_names:
+            x,ei,names = resp 
+        else:
+            x,ei = resp 
+
+        x = self._combine_data(x, obs)
+        self.last_obs = (x,ei)
+
+        if include_names:
+            if include_success:
+                return (x,ei,names), reward, done, info, str(success)
+            else:
+                return (x,ei,names), reward, done, info
+
+        return (x,ei), reward, done, info 
+
+    def reset(self):
+        tab_x = super().reset()
+        self.graph = ObservationGraph()
+        self.graph.setup(self.original_env.get_observation('Blue'))
+        graph_x, ei = self.graph.get_state()
+
+        x = self._combine_data(graph_x, tab_x)
+        self.last_obs = (x,ei)
+        return x, ei 
+
+    def _combine_data(self, graph_x, tabular_x):
+        tabular_x = tabular_x.reshape(tabular_x.shape[0]//4, 4)
+        
+        additional_data = torch.zeros(graph_x.size(0), 4)
+        additional_data[graph_x[:,0] == 1] = torch.tensor(tabular_x, dtype=torch.float32)
+        return torch.cat([graph_x, additional_data], dim=1)
