@@ -58,7 +58,8 @@ if __name__ == "__main__":
     wrap_line = lines.split('\n')[1].split('return ')[1]
     
     # Loading a pretrained graph PPO agent
-    agent = load_pretrained('model_weights/graph_ppo.pt')
+    agent = load_pretrained() # Non-inductive model 
+    # agent = load_inductive_pretrained() # Inductive model
     agent.set_deterministic(True)
 
     print(f'Using agent {agent.__class__.__name__}, if this is incorrect please update the code to load in your agent')
