@@ -289,7 +289,7 @@ class GraphPPOAgent:
         self.critic.opt.step()
 
 
-def load_pretrained(in_f='model_weights/graph_ppo.pt'):
+def load_pretrained(in_f='model_weights/noninductive.pt'):
     data = torch.load(in_f)
 
     args,kwargs = data['agent']
