@@ -18,7 +18,7 @@ import torch
 from Agents.KryptowireAgents.Utility import utils
 from CybORG.Shared.Actions.Action import Sleep
 
-from graph_wrapper.observation_graph import ObservationGraph
+from ..graph_wrapper.observation_graph import ObservationGraph
 
 class GraphWrapper:
     def __init__(self, env, action_space):

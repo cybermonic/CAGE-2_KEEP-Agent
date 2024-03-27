@@ -1,11 +1,12 @@
 # NOTE this is the evaluation file for evaluating our Agent using 
 # the Matrex API. This file needs to be installed along with Matrex API and CybORG
+import sys
+sys.path.append('/root') # if you run in docker container
 
-#from API.MaTrExApi import *
 from MaTrExApi import *
 from Agents import *
 from statistics import mean, stdev
-import sys
+
 from tqdm import tqdm
 from CybORG.Shared.Actions import *
 

@@ -23,7 +23,7 @@ from CybORG.Shared.Actions.AbstractActions import Remove, Restore, Analyse, Moni
 from CybORG.Shared.Actions.ConcreteActions import *
 from CybORG.Shared.Enums import TrinaryEnum
 
-from graph_wrapper.nodes import * 
+from ..graph_wrapper.nodes import * 
 
 class NodeTracker:
     '''

@@ -4,8 +4,8 @@ from torch.optim import Adam
 from torch.distributions.categorical import Categorical
 from torch_geometric.nn import GCNConv
 
-from graph_wrapper.observation_graph import ObservationGraph
-from agents.keep_agent import GraphPPOAgent, PPOMemory, N_HOSTS, N_HOST_ACTIONS, N_GLOBAL_ACTIONS
+from ..graph_wrapper.observation_graph import ObservationGraph
+from ..agents.keep_agent import GraphPPOAgent, PPOMemory, N_HOSTS, N_HOST_ACTIONS, N_GLOBAL_ACTIONS
 
 DEFAULT_DIM = ObservationGraph.DIM + 4 
 
@@ -169,7 +169,7 @@ class InductiveGraphPPOAgent(GraphPPOAgent):
         self.deterministic = False 
         self.mse = nn.MSELoss()
 
-def load_inductive_pretrained(in_f='model_weights/inductive_naive.pt', naive=True, num_nodes=None):
+def load_inductive_pretrained(in_f='/model_weights/inductive_naive.pt', naive=True, num_nodes=None):
     data = torch.load(in_f)
 
     args,kwargs = data['agent']
