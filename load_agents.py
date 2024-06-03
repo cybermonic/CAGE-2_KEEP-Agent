@@ -34,6 +34,18 @@ def load_global_attn_inductive_agent(num_nodes=None):
     weightfile = os.path.join(WEIGHT_DIR, 'inductive_global-attn.pt')
     return load_inductive_ppo(in_f=weightfile, naive=False, globalnode=True, num_nodes=num_nodes)
 
-def load_transductive_agent(num_nodes=None):
+def load_transductive_agent():
     weightfile = os.path.join(WEIGHT_DIR, 'noninductive.pt')
-    return load_transductive_agent(in_f=weightfile)
+    return load_transductive_ppo(in_f=weightfile)
+
+def load_agent(name: str, num_nodes=None):
+    name = name.lower().replace(' ', '')
+
+    if name == 'globalnode':
+        return load_global_attn_inductive_agent(num_nodes=num_nodes)
+    elif name == 'naive':
+        return load_naive_inductive_agent(num_nodes=num_nodes)
+    elif name == 'transductive':
+        return load_transductive_agent()
+
+    raise ValueError("`name` must be one of ['globalnode', 'naive', 'transductive']")

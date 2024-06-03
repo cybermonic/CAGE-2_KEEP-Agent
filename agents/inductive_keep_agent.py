@@ -148,7 +148,7 @@ class SimpleSelfAttention(nn.Module):
 class GlobalNodeInductiveActorNetwork(NaiveInductiveActorNetwork):
     def __init__(self, in_dim, num_nodes=13, action_space=11, n_global_actions=2,
                  hidden1=256, hidden2=64, lr=0.0003):
-        super().__init__(in_dim, num_nodes, action_space, hidden1, hidden2, lr)
+        super().__init__(in_dim, num_nodes, action_space, n_global_actions, hidden1, hidden2, lr)
         self.N_GLOBAL_ACTIONS = n_global_actions
 
         gdim = hidden1

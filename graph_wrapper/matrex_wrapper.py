@@ -15,10 +15,10 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import torch
-from Agents.KryptowireAgents.Utility import utils
 from CybORG.Shared.Actions.Action import Sleep
 
-from ..graph_wrapper.observation_graph import ObservationGraph
+from graph_wrapper.observation_graph import ObservationGraph
+import graph_wrapper.utils as utils
 
 class GraphWrapper:
     def __init__(self, env, action_space):
