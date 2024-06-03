@@ -1,118 +1,131 @@
-# Cybermonic CASTLE KEEP Agent
-# Copyright (C) 2024 Cybermonic LLC
+# NOTE this is the evaluation file for evaluating our Agent using
+# the Matrex API. This file needs to be installed along with Matrex API and CybORG
+import sys
+import datetime as dt
+sys.path.append('/root') # if you run in docker container
 
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Affero General Public License as published
-# by the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU Affero General Public License for more details.
-
-# You should have received a copy of the GNU Affero General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-import inspect
+from MaTrExApi import *
 from statistics import mean, stdev
-import subprocess
 
-from tqdm import tqdm 
+from tqdm import tqdm
+from CybORG.Shared.Actions import *
 
-from CybORG import CybORG, CYBORG_VERSION
-from CybORG.Agents import B_lineAgent, SleepAgent
-from CybORG.Agents.SimpleAgents.Meander import RedMeanderAgent
-
-from agents.keep_agent import load_pretrained
-from agents.inductive_keep_agent import load_inductive_pretrained
-from graph_wrapper.wrapper import GraphWrapper
-
+from load_agents import load_agent
+from graph_wrapper.matrex_wrapper import GraphWrapper
 
 MAX_EPS = 100
-SAVE_ACTION_DISTRO = False
-agent_name = 'Blue'
+timestamp = dt.datetime.now().isoformat().split('.')[0]
 
-'''
-Copied from CybORG directory 
-'''
+OUT_F = f'log_{timestamp}.csv'
+with open(OUT_F, 'w+') as f:
+    f.write('blue_agent,num_steps,red_agent,mean,std\n')
 
-def wrap(env):
-    return GraphWrapper('Blue', env)
+if __name__ == '__main__':
+    for blue_agent in ['GlobalNode', 'Naive', 'Transductive']:
+        for num_steps in [30, 50, 100]:
+            for red_agent in ["B_lineAgent", "RedMeanderAgent", "Kryptowire_DQN_Red", "Kryptowire_DQN_Reduced_Red", "RedPILLS_Cypher0_Red", "play"]:
+                # Create a new session
+                session = MaTrExApi()
 
-def get_git_revision_hash() -> str:
-    return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
+                request = {
+                            "client_name": "KRYPTOWIRE",
+                            "MaTrEx_version": "MaTrEx_v1"
+                            }
 
-if __name__ == "__main__":
-    cyborg_version = CYBORG_VERSION
-    scenario = 'Scenario2'
-    commit_hash = get_git_revision_hash()
-    # ask for a name
-    name = 'Isaiah, Benjamin, & Howie' 
-    # ask for a team
-    team = 'Cybermonic' 
-    # ask for a name for the agent
-    name_of_agent = 'KEEP'
+                session_info = session.new_session(request)
+                print(f"Evaluating Cybermonic GraphPPO agent against {red_agent} with {num_steps} steps for {MAX_EPS} episodes.")
 
-    lines = inspect.getsource(wrap)
-    wrap_line = lines.split('\n')[1].split('return ')[1]
-    
-    # Loading a pretrained graph PPO agent
-    agent = load_pretrained() # Non-inductive model 
-    # agent = load_inductive_pretrained() # Inductive model
-    agent.set_deterministic(True)
 
-    print(f'Using agent {agent.__class__.__name__}, if this is incorrect please update the code to load in your agent')
+                # Specify game parameters.
+                new_game_params = {
+                                    "client_token": session_info["client_token"],
+                                    "scenario": "Scenario2.yaml",
+                                    "main_agent": "Blue",
+                                    "blue_agent_0": "play",
+                                    "red_agent_0": red_agent,
+                                    "green_agent_0": "SleepAgent",
+                                    "wrapper": None,
+                                    "episode_length": num_steps,
+                                    "max_episodes": MAX_EPS+1,
+                                    "seed": 0
+                                    }
+                # Initiate a new game with requested parameters.
+                game_info = session.new_game(new_game_params)
 
-    '''
-    file_name = str(inspect.getfile(CybORG))[:-10] + '/Evaluation/' + time.strftime("%Y%m%d_%H%M%S") + f'_{agent.__class__.__name__}.txt'
-    print(f'Saving evaluation results to {file_name}')
-    with open(file_name, 'a+') as data:
-        data.write(f'CybORG v{cyborg_version}, {scenario}, Commit Hash: {commit_hash}\n')
-        data.write(f'author: {name}, team: {team}, technique: {name_of_agent}\n')
-        data.write(f"wrappers: {wrap_line}\n")
-    '''
-        
-    path = str(inspect.getfile(CybORG))
-    path = path[:-10] + f'/Shared/Scenarios/{scenario}.yaml'
+                # new_game() returns information about action space and observation
+                if game_info["status"] == "success":
+                    action_space = game_info["action_space"]
+                    obs = game_info["observation"]
+                    action_mapping_dict = game_info["action_mapping_dict"]
+                else:
+                    print(f"Game initiation failed with the following message:\n{game_info}")
+                    print()
 
-    print(f'using CybORG v{cyborg_version}, {scenario}\n')
-    for num_steps in [30, 50, 100]:
-        for red_agent in [B_lineAgent, RedMeanderAgent, SleepAgent]:
-            
-            cyborg = CybORG(path, 'sim', agents={'Red': red_agent})
 
-            wrapped_cyborg = wrap(cyborg)
-            observation = wrapped_cyborg.reset()
+                # Initiate your agent(action_space, observation)
+                agent = load_agent(blue_agent)
+                total_reward = []
 
-            total_reward = []
-            actions = []
-            for i in tqdm(range(MAX_EPS), desc=str(red_agent), total=MAX_EPS):
-                r = []
-                a = []
-                
-                for j in range(num_steps):
-                    action = agent.get_action(observation)
-                    observation, rew, done, info = wrapped_cyborg.step(action)
-                    
-                    #action_log[red_agent][str(cyborg.get_last_action('Blue'))] += 1
-                    true_state = cyborg.get_agent_state('True')
+                # During the game, you can request action_mapping for a specified agent name, as shown in the example below.
+                blue_action_mapping = session.action_mapping({"agent": "Blue"})
 
-                    r.append(rew)
-                    a.append((str(cyborg.get_last_action('Blue')), str(cyborg.get_last_action('Red'))))
+                # Wrapping in Kryptowire GraphWrapper to handle action/state mapping
+                # and tracking internal graph edits
+                wrapped = GraphWrapper(session, blue_action_mapping)
 
-                agent.end_episode()
-                total_reward.append(sum(r))
-                actions.append(a)
-                # observation = cyborg.reset().observation
+                # Need to reset env before playing
+                observation = wrapped.reset()['observation']
 
-                observation = wrapped_cyborg.reset()
+                # Start the game loop for the specified number of episodes MAX_EPS and steps per episode EPS_LEN.
+                total_reward = []
+                for eps in tqdm(range(MAX_EPS), desc='Processing'):
+                    r = []
 
-            print(f'Average reward for red agent {red_agent.__name__} and steps {num_steps} is: {mean(total_reward)} with a standard deviation of {stdev(total_reward)}')
-            
-            '''
-            with open(file_name, 'a+') as data:
-                data.write(f'steps: {num_steps}, adversary: {red_agent.__name__}, mean: {mean(total_reward)}, standard deviation {stdev(total_reward)}\n')
-                for act, sum_rew in zip(actions, total_reward):
-                    data.write(f'actions: {act}, total reward: {sum_rew}\n')
-            '''
+                    for steps in range(num_steps):
+                        # Get action based on current obsarvation with agent.get_action(observation, action_space)
+                        action = agent.get_action(observation)
+
+                        # Send that action with step() function
+                        result = wrapped.step(action)
+
+                        # Calling session.step() returns a dictionary containing information about observation, reward, done, info, action_space, and action_mapping_dict (if action_mapping is set to True in the step() call).
+                        if result["status"] == "success":
+                            observation = result["observation"]
+                            reward = result["reward"]
+                            done = result["done"]
+                            info = result["info"]
+                            action_space = result["action_space"]
+                            action_mapping_dict = result["action_mapping_dict"]
+
+                        else:
+                            print(f"Step failed with the following message:\n{result}")
+                            print()
+
+                        r.append(reward)
+
+                    # Reset environment at the end of the episode
+                    reset_result = wrapped.reset()
+                    observation = reset_result["observation"]
+
+                    agent.end_episode()
+                    total_reward.append(sum(r))
+
+                # Terminate your session at the end of the game. Specify your unique client_token for this session, which can be found in session_info as shown below.
+                terminate_request = {"client_token": session_info["client_token"]}
+                response = session.terminate(terminate_request)
+
+                # Print results of the terminate() request.
+                print(f"Session terminated with:\n{response}")
+                print()
+
+                # Request logs for the game. If successful, your logs will be saved in your working directory in the ./kafka-logs/{session_id} folder as {session_id}.json file.
+                response = session.get_logs({"client_token": session_info["client_token"]})
+
+                # Print results of the get_logs() request.
+                print(f"get_logs() returned:\n{response}")
+                print()
+
+                print(f'Average reward for red agent {red_agent} and steps {num_steps} is: {mean(total_reward)} with a standard deviation of {stdev(total_reward)}')
+
+                with open(OUT_F, 'a') as f:
+                    f.write(f'{blue_agent},{num_steps},{red_agent},{mean(total_reward)},{stdev(total_reward)}\n')
