@@ -1,4 +1,4 @@
-# NOTE this is the evaluation file for evaluating our Agent using 
+# NOTE this is the evaluation file for evaluating our Agent using
 # the Matrex API. This file needs to be installed along with Matrex API and CybORG
 import sys
 sys.path.append('/root') # if you run in docker container
@@ -9,6 +9,9 @@ from statistics import mean, stdev
 
 from tqdm import tqdm
 from CybORG.Shared.Actions import *
+
+from load_agents import *
+from graph_wrapper.matrex_wrapper import GraphWrapper
 
 MAX_EPS = 100
 
@@ -54,7 +57,7 @@ if __name__ == '__main__':
 
 
             # Initiate your agent(action_space, observation)
-            agent = load_inductive_pretrained()
+            agent = load_global_attn_inductive_agent()
             total_reward = []
 
             # During the game, you can request action_mapping for a specified agent name, as shown in the example below.
