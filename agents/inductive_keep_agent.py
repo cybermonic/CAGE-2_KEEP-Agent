@@ -20,7 +20,8 @@ from torch.optim import Adam
 from torch.distributions.categorical import Categorical
 from torch_geometric.nn import GCNConv
 
-from agents.transductive_keep_agent import GraphPPOAgent, PPOMemory
+from agents.transductive_keep_agent import GraphPPOAgent
+from agents.utils import PPOMemory
 
 class NaiveInductiveActorNetwork(nn.Module):
     def __init__(self, in_dim, num_nodes=13, action_space=11, n_global_actions=2,

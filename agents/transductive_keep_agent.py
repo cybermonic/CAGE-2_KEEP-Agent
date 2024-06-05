@@ -20,47 +20,12 @@ from torch.optim import Adam
 from torch.distributions.categorical import Categorical
 from torch_geometric.nn import GCNConv
 
+from agents.utils import PPOMemory
+
 N_HOSTS = 13
 N_HOST_ACTIONS = 11  # Analyze, remove, restore, decoy*8
 N_GLOBAL_ACTIONS = 2 # Sleep & monitor
 ACTION_SPACE = (N_HOST_ACTIONS*N_HOSTS) + N_GLOBAL_ACTIONS
-
-class PPOMemory:
-    def __init__(self, bs):
-        self.s = []
-        self.a = []
-        self.v = []
-        self.p = []
-        self.r = []
-        self.t = []
-
-        self.bs = bs
-
-    def remember(self, s,a,v,p,r,t):
-        '''
-        Can ignore is_terminal flag for CAGE since episodes continue forever
-        (may need to revisit if TA1 does something different)
-
-        Args are state, action, value, log_prob, reward
-        '''
-        self.s.append(s)
-        self.a.append(a)
-        self.v.append(v)
-        self.p.append(p)
-        self.r.append(r)
-        self.t.append(t)
-
-    def clear(self):
-        self.s = []; self.a = []
-        self.v = []; self.p = []
-        self.r = []; self.t = []
-
-    def get_batches(self):
-        idxs = torch.randperm(len(self.a))
-        batch_idxs = idxs.split(self.bs)
-
-        return self.s, self.a, self.v, \
-            self.p, self.r, self.t, batch_idxs
 
 
 class ActorNetwork(nn.Module):
