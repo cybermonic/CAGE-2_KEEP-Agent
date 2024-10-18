@@ -16,9 +16,9 @@
 
 import inspect
 from statistics import mean, stdev
-import subprocess
 
 from tqdm import tqdm
+from joblib import Parallel, delayed
 
 from CybORG import CybORG, CYBORG_VERSION
 from CybORG.Agents import B_lineAgent, SleepAgent
@@ -78,19 +78,40 @@ def calc_precision(env: CybORG, last_act: Action):
 
     return ret
 
+def generate_episode(num_steps, red_agent):
+    cyborg = CybORG(path, 'sim', agents={'Red': red_agent})
+
+    wrapped_cyborg = wrap(cyborg)
+    observation = wrapped_cyborg.reset()
+
+    r = []
+    precision = {'Restore': [], 'Remove': []}
+
+    for _ in range(num_steps):
+        action = agent.get_action(observation)
+        pr = calc_precision(cyborg, wrapped_cyborg.to_action_object(action))
+        observation, rew, done, info = wrapped_cyborg.step(action)
+
+        if pr is not None:
+            k,v = pr
+            precision[k].append(v)
+
+        r.append(rew)
+
+    agent.end_episode()
+    return sum(r), precision
+
+
 '''
 Copied from CybORG directory
 '''
 def wrap(env):
     return InductiveGraphWrapper('Blue', env)
 
-def get_git_revision_hash() -> str:
-    return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
-
 if __name__ == "__main__":
     cyborg_version = CYBORG_VERSION
     scenario = 'Scenario2'
-    commit_hash = get_git_revision_hash()
+
     # ask for a name
     name = 'Isaiah, Benjamin, & Howie'
     # ask for a team
@@ -103,7 +124,7 @@ if __name__ == "__main__":
 
     # Loading a pretrained graph PPO agent
     agent = load_agent('model_weights/inductive_agent.pt') # Default rewards model
-    # agent = load_agent('model_weights/high_precision.pt') # Reward-shaping model
+    # agent = load_agent('model_weights/high_precision.pt') # Reward-shaping model (still training)
     agent.set_deterministic(True)
 
     print(f'Using agent {agent.__class__.__name__}, if this is incorrect please update the code to load in your agent')
@@ -114,45 +135,20 @@ if __name__ == "__main__":
     print(f'using CybORG v{cyborg_version}, {scenario}\n')
     for num_steps in [30, 50, 100]:
         for red_agent in [B_lineAgent, RedMeanderAgent, SleepAgent]:
+            out = Parallel(n_jobs=MAX_EPS, prefer='processes')(
+                delayed(generate_episode)(num_steps, red_agent)
+                for _ in range(MAX_EPS)
+            )
 
-            cyborg = CybORG(path, 'sim', agents={'Red': red_agent})
+            total_reward, precisions = zip(*out)
+            restore = sum([precisions[i]['Restore'] for i in range(len(precisions))], [])
+            remove = sum([precisions[i]['Remove'] for i in range(len(precisions))], [])
 
-            wrapped_cyborg = wrap(cyborg)
-            observation = wrapped_cyborg.reset()
-
-            total_reward = []
-            actions = []
-            precision = {'Restore': [], 'Remove': []}
-            for i in tqdm(range(MAX_EPS), desc=str(red_agent), total=MAX_EPS):
-                r = []
-                a = []
-
-                for j in range(num_steps):
-                    action = agent.get_action(observation)
-                    pr = calc_precision(cyborg, wrapped_cyborg.to_action_object(action))
-                    observation, rew, done, info = wrapped_cyborg.step(action)
-
-                    if pr is not None:
-                        k,v = pr
-                        precision[k].append(v)
-
-                    r.append(rew)
-                    a.append((str(cyborg.get_last_action('Blue')), str(cyborg.get_last_action('Red'))))
-
-                agent.end_episode()
-                total_reward.append(sum(r))
-                actions.append(a)
-                # observation = cyborg.reset().observation
-
-                observation = wrapped_cyborg.reset()
-
-            restore = precision['Restore']
             if restore:
                 pr_restore = sum(restore) / len(restore)
             else:
                 pr_restore = 'NaN'
 
-            remove = precision['Remove']
             if remove:
                 pr_remove = sum(remove) / len(remove)
             else:
