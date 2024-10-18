@@ -16,153 +16,185 @@
 
 import torch
 from torch import nn
+from torch.distributions import Categorical
 from torch.optim import Adam
-from torch.distributions.categorical import Categorical
 from torch_geometric.nn import GCNConv
 
-N_HOSTS = 13
-N_HOST_ACTIONS = 11  # Analyze, remove, restore, decoy*8
-N_GLOBAL_ACTIONS = 2 # Sleep & monitor
-ACTION_SPACE = (N_HOST_ACTIONS*N_HOSTS) + N_GLOBAL_ACTIONS
+from agents.transductive_keep_agent import PPOMemory, GraphPPOAgent, combine_subgraphs
 
-class PPOMemory:
-    def __init__(self, bs):
-        self.s = []
-        self.a = []
-        self.v = []
-        self.p = []
-        self.r = []
-        self.t = []
+def pad_and_pack(x, batches, max_batch=None):
+    n_batches = batches.size(0)-1
+    if max_batch is None:
+        max_batch = (batches[1:] - batches[:-1]).max()
 
-        self.bs = bs
+    out = torch.zeros(n_batches, max_batch, x.size(-1)) # B x S x d
+    mask = torch.zeros(n_batches, max_batch, 1)
 
-    def remember(self, s,a,v,p,r,t):
-        '''
-        Can ignore is_terminal flag for CAGE since episodes continue forever
-        (may need to revisit if TA1 does something different)
+    for i in range(n_batches):
+        st = batches[i]; en = batches[i+1]
+        tot = en-st
+        out[i][:tot] = x[st:en]
+        mask[i][:tot] = 1.
 
-        Args are state, action, value, log_prob, reward
-        '''
-        self.s.append(s)
-        self.a.append(a)
-        self.v.append(v)
-        self.p.append(p)
-        self.r.append(r)
-        self.t.append(t)
-
-    def clear(self):
-        self.s = []; self.a = []
-        self.v = []; self.p = []
-        self.r = []; self.t = []
-
-    def get_batches(self):
-        idxs = torch.randperm(len(self.a))
-        batch_idxs = idxs.split(self.bs)
-
-        return self.s, self.a, self.v, \
-            self.p, self.r, self.t, batch_idxs
+    return out,mask
 
 
-class ActorNetwork(nn.Module):
-    def __init__(self, in_dim, num_nodes=N_HOSTS, action_space=ACTION_SPACE,
-                 hidden1=256, hidden2=64, lr=0.0003):
+class SimpleSelfAttention(nn.Module):
+    '''
+    Implimenting global-node self-attention from
+        https://arxiv.org/pdf/2009.12462.pdf
+    '''
+    def __init__(self, in_dim, h_dim, g_dim):
         super().__init__()
 
-        self.conv1 = GCNConv(in_dim, hidden1)
-        self.conv2 = GCNConv(hidden1, hidden2)
+        self.att = nn.Sequential(
+            nn.Linear(in_dim, h_dim),
+            nn.Softmax(dim=-1)
+        )
+        self.feat = nn.Linear(in_dim, h_dim)
+        self.glb = nn.Linear(h_dim+g_dim, g_dim)
+
+        self.g_dim = g_dim
+        self.h_dim = h_dim
+
+    def forward(self, v, mask=None, g=None):
+        '''
+        Inputs:
+            v: B x N x d tensor
+            g: B x d tensor
+        '''
+        if g is None:
+            g = torch.zeros((v.size(0), self.g_dim))
+        if mask is None:
+            mask = torch.ones((v.size(0), v.size(1), 1))
+
+        att = self.att(v)               # B x N x h
+        att = att * mask                # Zero out any masked rows
+        feat = self.feat(v)             # B x N x h
+        out = (att*feat).sum(dim=1)     # B x h
+
+        g_ = self.glb(torch.cat([out,g], dim=-1))  # B x g
+        return g + g_                               # Short-circuit
+
+
+class GlobalNodeInductiveActorNetwork(nn.Module):
+    def __init__(self, in_dim, action_space=11, n_global_actions=2,
+                 hidden1=256, hidden2=64, lr=0.0003, **kwargs):
+        super().__init__()
+        self.N_GLOBAL_ACTIONS = n_global_actions
+        self.N_NODE_ACTIONS = action_space
+
+        gdim = hidden1
         self.out = nn.Sequential(
-            nn.Linear(hidden2*num_nodes, action_space),
-            nn.Softmax(dim=-1)
+            nn.Linear(hidden2+gdim, hidden1),
+            nn.ReLU(),
+            nn.Linear(hidden1, action_space)
         )
 
-        self.drop = nn.Dropout()
-        self.opt = Adam(self.parameters(), lr)
-        self.num_nodes = num_nodes
-
-    def forward(self, x, ei):
-        hosts = x[:, 0] == 1
-
-        x = torch.relu(self.conv1(x, ei))
-        x = torch.relu(self.conv2(x, ei))
-
-        host_z = x[hosts]
-        nbatches = host_z.size(0) // self.num_nodes
-        dist = self.out(host_z.reshape(nbatches, self.num_nodes*host_z.size(1)))
-
-        return Categorical(dist)
-
-
-class CriticNetwork(nn.Module):
-    def __init__(self, in_dim, num_nodes=N_HOSTS, hidden1=256,
-                 hidden2=64, lr=0.001):
-        super().__init__()
-
-        self.conv1 = GCNConv(in_dim, hidden1)
-        self.conv2 = GCNConv(hidden1, hidden2)
-        self.out = nn.Linear(hidden2*num_nodes, 1)
-
-        self.opt = Adam(self.parameters(), lr)
-        self.num_nodes = num_nodes
-
-    def forward(self, x, ei):
-        hosts = x[:, 0] == 1
-
-        x = torch.relu(self.conv1(x, ei))
-        x = torch.relu(self.conv2(x, ei))
-
-        host_z = x[hosts]
-        nbatches = host_z.size(0) // self.num_nodes
-        return self.out(host_z.reshape(nbatches, self.num_nodes*host_z.size(1)))
-
-
-class ActorCritic(nn.Module):
-    def __init__(self, in_dim, num_nodes=N_HOSTS, action_space=ACTION_SPACE,
-                 hidden1=256, hidden2=64, lr=0.001):
-        super().__init__()
+        self.g0_attn = SimpleSelfAttention(in_dim, hidden1, gdim)
+        self.g1_attn = SimpleSelfAttention(hidden1, hidden1, gdim)
+        self.g2_attn = SimpleSelfAttention(hidden2, hidden2, gdim)
 
         self.conv1 = GCNConv(in_dim, hidden1)
         self.conv2 = GCNConv(hidden1, hidden2)
 
-        self.critic_net = nn.Linear(hidden2*num_nodes, 1)
-        self.actor_net = nn.Sequential(
-            nn.Linear(hidden2*num_nodes, action_space),
-            nn.Softmax(dim=-1)
-        )
+        self.opt = Adam(self.parameters(), lr)
 
-        self.opt = Adam(self.parameters(), lr=lr)
-
-    def forward(self, x,ei):
-        z = self.embed(x,ei)
-        value = self.critic_net(z)
-        distro = Categorical(self.actor_net(z))
-
-        return value,distro
-
-    def embed(self, x,ei):
+    def forward(self, x, ei, batches=None):
+        '''
+        x:          |V| x d node feature matrix
+        ei:         2 x |E| edge index
+        batches:    CSR style index of where batches start and end.
+                    E.g. for 3 graphs with 3,4 and 2 nodes would be
+                        [0,3,7,9]
+                    Note: this is for x[hosts], not x
+        '''
         hosts = x[:, 0] == 1
 
-        # Generate shared node embedding representations
-        z = torch.relu(self.conv1(x,ei))
-        z = torch.relu(self.conv2(z,ei))
+        # Assume unbatched input. E.g. single graph
+        if batches is None:
+            batches = torch.tensor([0, hosts.sum()], dtype=torch.long)
 
-        return z[hosts].flatten()
+        batch_sizes = batches[1:] - batches[:-1]
+        max_batch = batch_sizes.max()
 
-    def policy(self, x,ei):
-        z = self.embed(x,ei)
-        distro = Categorical(self.actor_net(z))
-        return distro
+        z,mask = pad_and_pack(x[hosts], batches, max_batch)
+        g = self.g0_attn(z,mask=mask)
+        x = torch.relu(self.conv1(x, ei))
 
-    def value(self, x,ei):
-        z = self.embed(x,ei)
-        value = self.critic_net(z)
-        return value
+        z,mask = pad_and_pack(x[hosts], batches, max_batch)
+        g = self.g1_attn(z, mask=mask, g=g) # B x h2
+        x = torch.relu(self.conv2(x, ei))
+
+        z,mask = pad_and_pack(x[hosts], batches, max_batch)
+        g = self.g2_attn(z, mask=mask, g=g)             # B x h2
+        g = g.repeat_interleave(batch_sizes, 0)         # B*N x h2
+
+        host_z = torch.cat([x[hosts], g], dim=1)        # B*N x h2*2
+        actions = self.out(host_z)                      # B*N x a
+
+        # Group by p(a) (currently grouped by node id)
+        # B x N_max x a
+        out,mask = pad_and_pack(actions, batches, max_batch)
+        out[mask.squeeze(-1) == 0] = float('-inf') # Mask actions on nodes that don't exist
+        #out = out.transpose(1,2) # Make rows actions, and columns nodes (B x a x N_max)
+        out = out.reshape(out.size(0), actions.size(1)*max_batch) # Combine batches into individual rows
+
+        return Categorical(logits=out)
 
 
-class GraphPPOAgent:
+class GlobalNodeInductiveCriticNetwork(nn.Module):
+    def __init__(self, in_dim,
+                 hidden1=256, hidden2=64, lr=0.001, **kwargs):
+        super().__init__()
+        gdim = hidden1
+
+        self.out = nn.Sequential(
+            nn.Linear(gdim, hidden2),
+            nn.ReLU(),
+            nn.Linear(hidden2, 1)
+        )
+
+        # Changing to maxpooling to mirror paper
+        self.conv1 = GCNConv(in_dim, hidden1, aggr='max')
+        self.conv2 = GCNConv(hidden1, hidden2, aggr='max')
+
+        self.g0_attn = SimpleSelfAttention(in_dim, hidden1, gdim)
+        self.g1_attn = SimpleSelfAttention(hidden1, hidden1, gdim)
+        self.g2_attn = SimpleSelfAttention(hidden2, hidden2, gdim)
+
+        self.opt = Adam(self.parameters(), lr)
+
+    def forward(self, x, ei, batches=None):
+        hosts = x[:, 0] == 1
+
+        # Assume unbatched input. E.g. single graph
+        if batches is None:
+            batches = torch.tensor([0, hosts.sum()], dtype=torch.long)
+
+        n_batches = batches[1:] - batches[:-1]
+        max_batch = n_batches.max()
+
+        h,mask = pad_and_pack(x[hosts], batches, max_batch)
+        g = self.g0_attn(h, mask=mask)
+        x = torch.relu(self.conv1(x, ei))   # B*N x h1
+
+        h,mask = pad_and_pack(x[hosts], batches, max_batch)
+        g = self.g1_attn(h, mask=mask, g=g) # B x h2
+        x = torch.relu(self.conv2(x, ei))   # B*N x h2
+
+        h,mask = pad_and_pack(x[hosts], batches, max_batch)
+        g = self.g2_attn(h, g=g) # B x h2
+        return self.out(g)       # B x 1
+
+
+class InductiveGraphPPOAgent(GraphPPOAgent):
     def __init__(self, in_dim, gamma=0.99, lmbda=0.95, clip=0.1, bs=5, epochs=6,
                  a_kwargs=dict(), c_kwargs=dict(), training=True):
-        self.actor = ActorNetwork(in_dim, **a_kwargs)
-        self.critic = CriticNetwork(in_dim, **c_kwargs)
+
+        self.actor = GlobalNodeInductiveActorNetwork(in_dim, **a_kwargs)
+        self.critic = GlobalNodeInductiveCriticNetwork(in_dim, **c_kwargs)
+
         self.memory = PPOMemory(bs)
 
         self.args = (in_dim,)
@@ -177,66 +209,33 @@ class GraphPPOAgent:
         self.bs = bs
         self.epochs = epochs
 
+        self.action_space = self.actor.N_NODE_ACTIONS
+
         self.training = training
         self.deterministic = False
         self.mse = nn.MSELoss()
 
-    def set_deterministic(self, val):
-        self.deterministic = val
-
-    def train(self):
-        self.training = True
-        self.actor.train()
-        self.critic.train()
-
-    def eval(self):
-        self.training = False
-        self.actor.eval()
-        self.critic.eval()
-
-    def save(self, outf='saved_models/graph_ppo.pt'):
-        me = (self.args, self.kwargs)
-
-        torch.save({
-            'actor': self.actor.state_dict(),
-            'critic': self.critic.state_dict(),
-            'agent': me
-        }, outf)
-
-    def remember(self, s,a,v,p,r,t):
-        self.memory.remember(s,a,v,p,r,t)
-
-    def end_episode(self):
-        pass
-
-    @torch.no_grad()
-    def get_action(self, x_ei):
-        x,ei = x_ei
-        distro = self.actor(x,ei)
-
-        # I don't know why this would ever be called
-        # during training, but just in case, putting the
-        # logic block outside the training check
-        if self.deterministic:
-            action = distro.probs.argmax()
-        else:
-            action = distro.sample()
-
-        if not self.training:
-            return action.item()
-
-        value = self.critic(x,ei)
-        prob = distro.log_prob(action)
-        return action.item(), value.item(), prob.item()
 
     def learn(self, verbose=True):
         '''
-        Assume that an external process is adding memories to
-        the PPOMemory unit, and this is called every so often
+        Same as before, just need to use uneven_batches=True in the combine_subgraphs function
         '''
         for e in range(self.epochs):
             s,a,v,p,r,t, batches = self.memory.get_batches()
 
+            '''
+            advantage = torch.zeros(len(s), dtype=torch.float)
+
+            # Probably a more efficient way to do this in parallel w torch
+            for t in range(len(s)-1):
+                discount = 1
+                a_t = 0
+                for k in range(t, len(s)-1):
+                    a_t += discount*(r[k] + self.gamma*v[k+1] -v[k])
+                    discount *= self.gamma*self.lmbda
+
+                advantage[t] = a_t
+            '''
             rewards = []
             discounted_reward = 0
             for reward, is_terminal in zip(reversed(r), reversed(t)):
@@ -256,7 +255,7 @@ class GraphPPOAgent:
 
                 s_ = [s[idx] for idx in b]
                 a_ = [a[idx] for idx in b]
-                batched_states = combine_subgraphs(s_)
+                batched_states = combine_subgraphs(s_, uneven_batches=True)
                 dist = self.actor(*batched_states)
 
                 critic_vals = self.critic(*batched_states)
@@ -296,48 +295,14 @@ class GraphPPOAgent:
         self.memory.clear()
         return total_loss.item()
 
-    def _zero_grad(self):
-        self.actor.opt.zero_grad()
-        self.critic.opt.zero_grad()
 
-    def _step(self):
-        self.actor.opt.step()
-        self.critic.opt.step()
-
-
-def load_pretrained(in_f='model_weights/noninductive.pt'):
+def load_agent(in_f='model_weights/inductive_agent.pt'):
     data = torch.load(in_f)
-
     args,kwargs = data['agent']
-    agent = GraphPPOAgent(*args, **kwargs)
+
+    agent = InductiveGraphPPOAgent(*args, **kwargs)
     agent.actor.load_state_dict(data['actor'])
     agent.critic.load_state_dict(data['critic'])
 
     agent.eval()
     return agent
-
-
-def combine_subgraphs(states, uneven_batches=False):
-    xs,eis = zip(*states)
-
-    # ei we need to update each node idx to be
-    # ei[i] += len(ei[i-1])
-    offset=0
-    new_eis=[]
-    batches=[0]
-    for i in range(len(eis)):
-        new_eis.append(eis[i]+offset)
-
-        if uneven_batches:
-            n_hosts = (xs[i][:, 0] == 1).sum()
-            batches.append(batches[-1] + n_hosts)
-
-        offset += xs[i].size(0)
-
-    # X is easy, just cat
-    xs = torch.cat(xs, dim=0)
-    eis = torch.cat(new_eis, dim=1)
-
-    if uneven_batches:
-        return xs, eis, torch.tensor(batches)
-    return xs,eis

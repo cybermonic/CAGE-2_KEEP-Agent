@@ -17,7 +17,6 @@
 import inspect
 from statistics import mean, stdev
 
-from tqdm import tqdm
 from joblib import Parallel, delayed
 
 from CybORG import CybORG, CYBORG_VERSION
@@ -25,8 +24,7 @@ from CybORG.Agents import B_lineAgent, SleepAgent
 from CybORG.Agents.SimpleAgents.Meander import RedMeanderAgent
 from CybORG.Shared.Actions import Restore, Remove, Action
 
-from agents.variable_topology_agent import load_agent
-from agents.inductive_keep_agent import load_inductive_pretrained
+from agents.keep_agent import load_agent
 from graph_wrapper.wrapper import InductiveGraphWrapper
 
 
