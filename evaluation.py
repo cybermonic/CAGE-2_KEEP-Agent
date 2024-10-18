@@ -1,131 +1,162 @@
-# NOTE this is the evaluation file for evaluating our Agent using
-# the Matrex API. This file needs to be installed along with Matrex API and CybORG
-import sys
-import datetime as dt
-sys.path.append('/root') # if you run in docker container
+# Cybermonic CASTLE KEEP Agent
+# Copyright (C) 2024 Cybermonic LLC
 
-from MaTrExApi import *
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published
+# by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+import inspect
 from statistics import mean, stdev
+import subprocess
 
 from tqdm import tqdm
-from CybORG.Shared.Actions import *
 
-from load_agents import load_agent
-from graph_wrapper.matrex_wrapper import GraphWrapper
+from CybORG import CybORG, CYBORG_VERSION
+from CybORG.Agents import B_lineAgent, SleepAgent
+from CybORG.Agents.SimpleAgents.Meander import RedMeanderAgent
+from CybORG.Shared.Actions import Restore, Remove, Action
+
+from agents.variable_topology_agent import load_agent
+from agents.inductive_keep_agent import load_inductive_pretrained
+from graph_wrapper.wrapper import InductiveGraphWrapper
+
 
 MAX_EPS = 100
-timestamp = dt.datetime.now().isoformat().split('.')[0]
-
-OUT_F = f'log_{timestamp}.csv'
-with open(OUT_F, 'w+') as f:
-    f.write('blue_agent,num_steps,red_agent,mean,std\n')
-
-if __name__ == '__main__':
-    for blue_agent in ['GlobalNode', 'Naive', 'Transductive']:
-        for num_steps in [30, 50, 100]:
-            for red_agent in ["B_lineAgent", "RedMeanderAgent", "Kryptowire_DQN_Red", "Kryptowire_DQN_Reduced_Red", "RedPILLS_Cypher0_Red", "play"]:
-                # Create a new session
-                session = MaTrExApi()
-
-                request = {
-                            "client_name": "KRYPTOWIRE",
-                            "MaTrEx_version": "MaTrEx_v1"
-                            }
-
-                session_info = session.new_session(request)
-                print(f"Evaluating Cybermonic GraphPPO agent against {red_agent} with {num_steps} steps for {MAX_EPS} episodes.")
+SAVE_ACTION_DISTRO = False
+agent_name = 'Blue'
 
 
-                # Specify game parameters.
-                new_game_params = {
-                                    "client_token": session_info["client_token"],
-                                    "scenario": "Scenario2.yaml",
-                                    "main_agent": "Blue",
-                                    "blue_agent_0": "play",
-                                    "red_agent_0": red_agent,
-                                    "green_agent_0": "SleepAgent",
-                                    "wrapper": None,
-                                    "episode_length": num_steps,
-                                    "max_episodes": MAX_EPS+1,
-                                    "seed": 0
-                                    }
-                # Initiate a new game with requested parameters.
-                game_info = session.new_game(new_game_params)
+FP = 0; TP = 1
+def calc_precision(env: CybORG, last_act: Action):
+    '''
+    Returns (Action_string, int) where Action_string is either "Remove" or "Restore"
+    and the int is [0,1] denoting if that action was a true positive (e.g. a restore
+    on a rooted host) or a false positive (e.g. restore on a clean/user-level access host)
 
-                # new_game() returns information about action space and observation
-                if game_info["status"] == "success":
-                    action_space = game_info["action_space"]
-                    obs = game_info["observation"]
-                    action_mapping_dict = game_info["action_mapping_dict"]
-                else:
-                    print(f"Game initiation failed with the following message:\n{game_info}")
-                    print()
+    Could do some extra metrics about restoring on a user level host. Is that really a false
+    positive? Unclear. Restoring a clean host for sure is an FP though...
+    '''
+    def determine_red_access(session_list):
+        '''
+        Stolen from TrueTableWrapper
+        '''
+        for session in session_list:
+            if session['Agent'] != 'Red':
+                continue
+            privileged = session['Username'] in {'root','SYSTEM'}
+            return 'Root' if privileged else 'User'
 
+        return 'None'
 
-                # Initiate your agent(action_space, observation)
-                agent = load_agent(blue_agent)
-                total_reward = []
+    ret = None
 
-                # During the game, you can request action_mapping for a specified agent name, as shown in the example below.
-                blue_action_mapping = session.action_mapping({"agent": "Blue"})
+    # As of right now, only calculating TP/FP on Restore and Remove
+    if isinstance(last_act, Restore) or isinstance(last_act, Remove):
+        target = last_act.hostname
+        true_state = env.get_agent_state('True')[target]['Sessions']
+        red_foothold = determine_red_access(true_state)
 
-                # Wrapping in Kryptowire GraphWrapper to handle action/state mapping
-                # and tracking internal graph edits
-                wrapped = GraphWrapper(session, blue_action_mapping)
+        last_act_str = str(last_act).split(' ')[0]
 
-                # Need to reset env before playing
-                observation = wrapped.reset()['observation']
+        if red_foothold == 'None':
+            ret = FP
+        elif red_foothold == 'User':
+            ret = FP if last_act_str == 'Restore' else TP # TP only if user-level shell was `Remove`d
+        elif red_foothold == 'Root':
+            ret = TP if last_act_str == 'Restore' else FP # TP only if root-level shell was `Restore`d
 
-                # Start the game loop for the specified number of episodes MAX_EPS and steps per episode EPS_LEN.
-                total_reward = []
-                for eps in tqdm(range(MAX_EPS), desc='Processing'):
-                    r = []
+        ret = (last_act_str, ret)
 
-                    for steps in range(num_steps):
-                        # Get action based on current obsarvation with agent.get_action(observation, action_space)
-                        action = agent.get_action(observation)
+    return ret
 
-                        # Send that action with step() function
-                        result = wrapped.step(action)
+'''
+Copied from CybORG directory
+'''
+def wrap(env):
+    return InductiveGraphWrapper('Blue', env)
 
-                        # Calling session.step() returns a dictionary containing information about observation, reward, done, info, action_space, and action_mapping_dict (if action_mapping is set to True in the step() call).
-                        if result["status"] == "success":
-                            observation = result["observation"]
-                            reward = result["reward"]
-                            done = result["done"]
-                            info = result["info"]
-                            action_space = result["action_space"]
-                            action_mapping_dict = result["action_mapping_dict"]
+def get_git_revision_hash() -> str:
+    return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode('ascii').strip()
 
-                        else:
-                            print(f"Step failed with the following message:\n{result}")
-                            print()
+if __name__ == "__main__":
+    cyborg_version = CYBORG_VERSION
+    scenario = 'Scenario2'
+    commit_hash = get_git_revision_hash()
+    # ask for a name
+    name = 'Isaiah, Benjamin, & Howie'
+    # ask for a team
+    team = 'Cybermonic'
+    # ask for a name for the agent
+    name_of_agent = 'KEEP'
 
-                        r.append(reward)
+    lines = inspect.getsource(wrap)
+    wrap_line = lines.split('\n')[1].split('return ')[1]
 
-                    # Reset environment at the end of the episode
-                    reset_result = wrapped.reset()
-                    observation = reset_result["observation"]
+    # Loading a pretrained graph PPO agent
+    agent = load_agent('model_weights/inductive_agent.pt') # Default rewards model
+    # agent = load_agent('model_weights/high_precision.pt') # Reward-shaping model
+    agent.set_deterministic(True)
 
-                    agent.end_episode()
-                    total_reward.append(sum(r))
+    print(f'Using agent {agent.__class__.__name__}, if this is incorrect please update the code to load in your agent')
 
-                # Terminate your session at the end of the game. Specify your unique client_token for this session, which can be found in session_info as shown below.
-                terminate_request = {"client_token": session_info["client_token"]}
-                response = session.terminate(terminate_request)
+    path = str(inspect.getfile(CybORG))
+    path = path[:-10] + f'/Shared/Scenarios/{scenario}.yaml'
 
-                # Print results of the terminate() request.
-                print(f"Session terminated with:\n{response}")
-                print()
+    print(f'using CybORG v{cyborg_version}, {scenario}\n')
+    for num_steps in [30, 50, 100]:
+        for red_agent in [B_lineAgent, RedMeanderAgent, SleepAgent]:
 
-                # Request logs for the game. If successful, your logs will be saved in your working directory in the ./kafka-logs/{session_id} folder as {session_id}.json file.
-                response = session.get_logs({"client_token": session_info["client_token"]})
+            cyborg = CybORG(path, 'sim', agents={'Red': red_agent})
 
-                # Print results of the get_logs() request.
-                print(f"get_logs() returned:\n{response}")
-                print()
+            wrapped_cyborg = wrap(cyborg)
+            observation = wrapped_cyborg.reset()
 
-                print(f'Average reward for red agent {red_agent} and steps {num_steps} is: {mean(total_reward)} with a standard deviation of {stdev(total_reward)}')
+            total_reward = []
+            actions = []
+            precision = {'Restore': [], 'Remove': []}
+            for i in tqdm(range(MAX_EPS), desc=str(red_agent), total=MAX_EPS):
+                r = []
+                a = []
 
-                with open(OUT_F, 'a') as f:
-                    f.write(f'{blue_agent},{num_steps},{red_agent},{mean(total_reward)},{stdev(total_reward)}\n')
+                for j in range(num_steps):
+                    action = agent.get_action(observation)
+                    pr = calc_precision(cyborg, wrapped_cyborg.to_action_object(action))
+                    observation, rew, done, info = wrapped_cyborg.step(action)
+
+                    if pr is not None:
+                        k,v = pr
+                        precision[k].append(v)
+
+                    r.append(rew)
+                    a.append((str(cyborg.get_last_action('Blue')), str(cyborg.get_last_action('Red'))))
+
+                agent.end_episode()
+                total_reward.append(sum(r))
+                actions.append(a)
+                # observation = cyborg.reset().observation
+
+                observation = wrapped_cyborg.reset()
+
+            restore = precision['Restore']
+            if restore:
+                pr_restore = sum(restore) / len(restore)
+            else:
+                pr_restore = 'NaN'
+
+            remove = precision['Remove']
+            if remove:
+                pr_remove = sum(remove) / len(remove)
+            else:
+                pr_remove = 'NaN'
+
+            print(f'Average reward for red agent {red_agent.__name__} and steps {num_steps} is: {mean(total_reward)} +/- {stdev(total_reward)}')
+            print(f'Restore precision: {pr_restore}\tRemove precision: {pr_remove}')

@@ -15,10 +15,10 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import torch
-from CybORG.Shared.Actions.Action import Sleep
+from Agents.KryptowireAgents.Utility import utils
+from CybORG.Shared.Actions import *
 
 from graph_wrapper.observation_graph import ObservationGraph
-import graph_wrapper.utils as utils
 
 class GraphWrapper:
     def __init__(self, env, action_space):
@@ -88,3 +88,44 @@ class GraphWrapper:
         additional_data = torch.zeros(graph_x.size(0), 4)
         additional_data[graph_x[:,0] == 1] = torch.tensor(tabular_x, dtype=torch.float32)
         return torch.cat([graph_x, additional_data], dim=1)
+
+    def to_action_object(self, action):
+        return self.possible_actions[action]
+
+
+class InductiveGraphWrapper(GraphWrapper):
+    ACTIONS = [
+        Analyse, Remove, DecoyApache, DecoyFemitter, DecoyHarakaSMPT, DecoySmss,
+        DecoySSHD, DecoySvchost, DecoyTomcat, DecoyVsftpd, Restore,
+    ]
+    HOSTNAMES = [] # Filled in by self.reset()
+
+    def action_translator(self, action):
+        '''
+        Unlike previous wrapper, assumes actions are indexed by
+        action id rather than node id.
+            E.g. actions 0,1,2 are [A_1(n_1), A_2(n_1), A_3(n_1)]
+                               NOT [A_1(n_1), A_1(n_2), A_1(n_3)]
+
+        Need to flip this back around before reusing the old code
+        '''
+        if action is None:
+            return None
+
+        target = action // len(self.ACTIONS)
+        act = action % len(self.ACTIONS)
+        act_id = act * len(self.HOSTNAMES) + target + 2
+        return act_id
+
+    def step(self, action=None, include_names=False, include_success=False):
+        action = self.action_translator(action)
+        return super().step(action, include_names, include_success)
+
+    def reset(self):
+        ret = super().reset()
+        self.HOSTNAMES = self.graph.hostnames
+        return ret
+
+    def to_action_object(self, action):
+        act_id = self.action_translator(action)
+        return super().to_action_object(act_id)

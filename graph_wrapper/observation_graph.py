@@ -22,7 +22,6 @@ import torch
 from CybORG.Shared.Actions.AbstractActions import Remove, Restore, Analyse, Monitor
 from CybORG.Shared.Actions.ConcreteActions import *
 from CybORG.Shared.Enums import TrinaryEnum
-
 from graph_wrapper.nodes import *
 
 class NodeTracker:
@@ -52,9 +51,30 @@ class NodeTracker:
             self.mapping.pop(node_str)
             self.inv_mapping.pop(nid)
 
+    def get(self, node_str):
+        return self.mapping.get(node_str, None)
+
     def id_to_str(self, nid):
         return self.inv_mapping.get(nid)
 
+
+class LastAnalyzed:
+    def __init__(self, hosts, halflife=10):
+        self.hosts = hosts
+        self.host_to_hid = {host:i for i,host in enumerate(self.hosts)}
+        self.last_analyzed = torch.tensor([float('inf')] * len(hosts))
+        self.halflife = halflife
+
+    def analyze(self, host):
+        self.hosts[self.host_to_hid[host]] = 0
+
+    def decay(self):
+        self.last_analyzed += 1
+
+    def host_feats(self):
+        h = self.last_analyzed.clone()
+        h = torch.pow(0.5, h/self.halflife)
+        return h
 
 class ObservationGraph:
     '''
@@ -94,9 +114,10 @@ class ObservationGraph:
     }
     DECOYS = DECOY_TO_PORT.keys()
 
-    def __init__(self):
+    def __init__(self, last_analyzed_feat=False):
         self.nids = NodeTracker()
         self.nodes = dict()
+        self.last_analyzed_feat = last_analyzed_feat
 
     def setup(self, initial_observation: dict):
         '''
@@ -132,16 +153,12 @@ class ObservationGraph:
 
         # Keep track of which nodes are getting deleted when Remove is called
         self.host_to_sussy = defaultdict(list)
+        self.last_analyzed = LastAnalyzed(self.host_ids)
 
         # Gotta put it back in case other methods need the observation
         initial_observation['success'] = succ
 
     def get_state(self, include_names=False):
-        '''
-        NOTE: may want to experiment w each node having unique
-        ID that's input into model (e.g. non-inductive)
-        Less useful IRL but may perform better
-        '''
         ei = torch.tensor([
             self.permenant_edges[0] + self.transient_edges[0],
             self.permenant_edges[1] + self.transient_edges[1]
@@ -169,9 +186,13 @@ class ObservationGraph:
 
     def parse_initial_observation(self, obs):
         edges = set()
+        hosts = []
+        hostnames = []
 
         for hostname, info in obs.items():
             nid = self.nids[hostname]
+            hosts.append(nid)
+            hostnames.append(hostname)
 
             if 'Op_Server' in hostname:
                 crown_jewel = True
@@ -193,10 +214,15 @@ class ObservationGraph:
                 edges.add((nid, sub_id))
 
             # TODO look for open ports
+
+        self.host_ids = hosts
+        self.hostnames = hostnames
         return edges
 
     def parse_observation(self, act, obs):
         success = obs.pop('success')
+        self.last_analyzed.decay()
+
         if isinstance(act, Restore) and success == TrinaryEnum.TRUE:
             # print("Handling restore")
             # Removes all files/sessions/connections from act.hostname
@@ -210,7 +236,7 @@ class ObservationGraph:
                 if v.startswith(act.hostname) and k != host_id
             ]
 
-            [self.nids.pop(self.nids.inv_mapping[port_id]) for port_id in host_ports]
+            #[self.nids.pop(self.nids.inv_mapping[port_id]) for port_id in host_ports]
             removed = [host_id] + host_ports
 
             new_edges = [[],[]]
@@ -226,6 +252,9 @@ class ObservationGraph:
             if act.hostname in self.host_to_sussy:
                 self.host_to_sussy.pop(act.hostname)
 
+            self.nodes[host_id].feats['sus'] = False
+            self.nodes[host_id].feats['pwned'] = False
+
         elif isinstance(act, Remove) and success == TrinaryEnum.TRUE:
             # print("handling Remove on:" )
             # print(act.hostname)
@@ -234,6 +263,9 @@ class ObservationGraph:
                 sus_ids = self.host_to_sussy.pop()
             else:
                 sus_ids = []
+
+            host_id = self.nids[act.hostname]
+            self.nodes[host_id].feats['sus'] = False
 
             if sus_ids:
                 new_edges = [[],[]]
@@ -245,6 +277,10 @@ class ObservationGraph:
                         new_edges[1].append(dst)
 
                 self.transient_edges = new_edges
+
+        elif (isinstance(act, Analyse) and success == TrinaryEnum.TRUE):
+            nid = self.nids.get(act.hostname)
+            self.last_analyzed.analyze(nid)
 
         elif (decoy_type := type(act)) in self.DECOYS and success == TrinaryEnum.TRUE:
             # Add new process (e.g. port) to act.hostname
@@ -304,6 +340,7 @@ class ObservationGraph:
                     if 'PID' in proc:
                         sus = True
                         self.host_to_sussy[host_id].append(port_id)
+                        self.nodes[host_id].feats['sus'] = True
 
                     # Just make a new node every time so we don't have to worry abt keeping
                     # track of if it's suspicious or not
@@ -316,7 +353,9 @@ class ObservationGraph:
                 for file in files:
                     file_uq_str = f"{hostname}:{file['Path']}\\{file['File Name']}"
                     file_id = self.nids[file_uq_str]
+
                     self.nodes[file_id] = FileNode(file_id, file)
+                    self.nodes[host_id].feats['pwned'] = True
 
                     edges.update([
                         (host_id, file_id),

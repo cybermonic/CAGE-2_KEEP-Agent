@@ -14,13 +14,13 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-from abc import ABC
-from collections.abc import Iterable 
+from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from collections import OrderedDict
 
 import numpy as np
 
-import CybORG.Shared.Enums as Enums 
+import CybORG.Shared.Enums as Enums
 
 class Node(ABC, object):
     '''
@@ -41,25 +41,25 @@ class Node(ABC, object):
 
     '''
     Defining __eq__ and __hash__ as so allows us to create a set
-    of nodes to avoid duplicates later on 
+    of nodes to avoid duplicates later on
     '''
     def __eq__(self, other):
         if isinstance(other, Node):
-            return self.uuid == other.uuid 
-        else: 
-            return False 
-        
+            return self.uuid == other.uuid
+        else:
+            return False
+
     def __hash__(self):
-        return self.uuid 
+        return self.uuid
 
     def __init__(self, uuid: int, observation: dict):
-        self.uuid = uuid 
+        self.uuid = uuid
         self.parse_observation(observation)
 
 
-    def parse_observation(self, obs: dict) -> None: 
+    def parse_observation(self, obs: dict) -> None:
         '''
-        Given the dictionary from an observation, update/set 
+        Given the dictionary from an observation, update/set
         features (perhaps using the set_features method)
 
         By default, only pulls out what can be given in an
@@ -83,21 +83,25 @@ class Node(ABC, object):
 
         offset = 0
         for i,feat in enumerate(self.feats.values()):
-            # Enums are 1-indexed 
-            if feat: 
-                if isinstance(feat, Iterable): 
-                    for f in feat: 
+            # Enums are 1-indexed
+            if feat:
+                if isinstance(feat, Iterable) and not isinstance(feat, str):
+                    for f in feat:
                         out[offset + (f.value-1)] = 1
                 elif isinstance(feat, float):
-                    out[offset] = feat 
-                elif isinstance(feat, bool): 
+                    out[offset] = feat
+                elif isinstance(feat, bool):
                     out[offset] = float(feat)
-                else: 
+                elif isinstance(feat, str):
+                    # Only happens when processing emulated output.
+                    # Feats aren't that important, so leave blank
+                    out[offset] = 0
+                else:
                     out[offset + (feat.value-1)] = 1
-            
+
             offset += self.dims[i]
 
-        return out 
+        return out
 
     def human_readable(self):
         human_readable = []
@@ -106,10 +110,10 @@ class Node(ABC, object):
                 human_readable += [f'{feat_str}-{j}' for j in range(self.dims[i])]
             else:
                 human_readable.append(feat_str)
-        
+
         return human_readable
 
-    def __str__(self): 
+    def __str__(self):
         nl='\n'; tab='\t'
         return f'''{self.__class__}-{self.uuid}\n\t{(nl+tab).join(self.human_readable())}'''
 
@@ -117,14 +121,16 @@ class SystemNode(Node):
     def __init__(self, uuid: int, observation: dict, is_server=False, crown_jewel=False):
         self.feats = OrderedDict(
             Architecture = None,
-            OSDistro = None, 
-            OSType = None, 
-            OSVersion = None, 
-            OSKernelVersion = None, 
+            OSDistro = None,
+            OSType = None,
+            OSVersion = None,
+            OSKernelVersion = None,
             os_patches = [],
             crown_jewel=float(crown_jewel),
-            user=float(not is_server), 
-            server=float(is_server)
+            user=float(not is_server),
+            server=float(is_server),
+            sus=False,
+            pwned=False
         )
 
         self.dims = [
@@ -133,23 +139,22 @@ class SystemNode(Node):
             len(Enums.OperatingSystemType.__members__),
             len(Enums.OperatingSystemVersion.__members__),
             len(Enums.OperatingSystemKernelVersion.__members__),
-            len(Enums.OperatingSystemPatch.__members__), 
-            1,1,1
+            len(Enums.OperatingSystemPatch.__members__),
+            1,1,1,1,1
         ]
         self.dim = sum(self.dims)
 
-        self.labels = list(Enums.Architecture.__members__.items()) + list(Enums.OperatingSystemDistribution.__members__.items()) +list(Enums.OperatingSystemType.__members__.items()) +list(Enums.OperatingSystemVersion.__members__.items()) + list(Enums.OperatingSystemKernelVersion.__members__.items()) + list(Enums.OperatingSystemPatch.__members__.items()) + ["crown_jewel", "user", "server"]
-
+        self.labels = list(Enums.Architecture.__members__.items()) + list(Enums.OperatingSystemDistribution.__members__.items()) +list(Enums.OperatingSystemType.__members__.items()) +list(Enums.OperatingSystemVersion.__members__.items()) + list(Enums.OperatingSystemKernelVersion.__members__.items()) + list(Enums.OperatingSystemPatch.__members__.items()) + ["crown_jewel", "user", "server", "sus", "pwned"]
         super().__init__(uuid, observation)
-        
+
 
 class ProcessNode(Node):
-    def __init__(self, uuid: int, observation: dict, is_new: bool = True, is_decoy: bool = False): 
+    def __init__(self, uuid: int, observation: dict, is_new: bool = True, is_decoy: bool = False):
         self.feats = OrderedDict(
             KnownProcess=None,
-            KnownPath=None, 
-            ProcessType=None, 
-            ProcessVersion=None, 
+            KnownPath=None,
+            ProcessType=None,
+            ProcessVersion=None,
             Vulnerability=None,
             Type=None, # Used for sessions only
             is_new=float(is_new),
@@ -174,37 +179,37 @@ class ProcessNode(Node):
 class SessionNode(ProcessNode):
     def __init__(self, uuid: int, observation: dict, is_new: bool = True, is_decoy: bool = False):
         super().__init__(uuid, observation, is_new, is_decoy)
-        self.feats['is_session'] = 1.0 
+        self.feats['is_session'] = 1.0
 
 
 class FileNode(Node):
-    def __init__(self, uuid: int, observation: dict, is_new=True):    
+    def __init__(self, uuid: int, observation: dict, is_new=True):
         self.feats = OrderedDict(
             [
                 (s, None) for s in [
                     'Known File',
-                    'Known Path', 
+                    'Known Path',
                     'User Permissions',
-                    'Group Permissions', 
+                    'Group Permissions',
                     'Default Permissions'
                 ]
             ],
             Version=None,
-            Type=None, 
-            Vendor=None, 
-            
-            # Additional static features 
+            Type=None,
+            Vendor=None,
+
+            # Additional static features
             is_new=float(is_new),
 
             # Will be updated if observed later
-            Density= -1., 
+            Density= -1.,
             Signed= -1.
         )
 
         self.dims = [
             len(Enums.FileType.__members__),
             len(Enums.Path.__members__),
-            8,8,8, # Permissions groups 
+            8,8,8, # Permissions groups
             len(Enums.FileVersion.__members__),
             len(Enums.FileType.__members__),
             len(Enums.Vendor.__members__),
@@ -225,7 +230,7 @@ class UserNode(Node):
 
         self.feats = OrderedDict(
             [
-                ('Password Hash Type', None), 
+                ('Password Hash Type', None),
                 ('Logged in', float(-1))
             ],
             pwd_changed=float(False), # Initialize to false instead of -1
@@ -233,7 +238,7 @@ class UserNode(Node):
         )
 
         self.dims = [
-            len(Enums.PasswordHashType.__members__), 
+            len(Enums.PasswordHashType.__members__),
             1,1,1
         ]
         self.dim = sum(self.dims)
@@ -241,28 +246,28 @@ class UserNode(Node):
         self.labels = list(Enums.PasswordHashType.__members__.items()) + ['logged in', 'pwd changed', 'pwd hash changed']
 
         super().__init__(uuid, observation)
-        
+
 
     def parse_observation(self, obs: dict) -> None:
         '''
-        Modified bc we're tracking if variables have changed 
+        Modified bc we're tracking if variables have changed
         between observations (not sure how effective this is but
         may as well throw it in)
         '''
         if (pwd := obs.get('Password')) and pwd != self.pwd:
-            obs['pwd_changed'] = 1.0 
-            self.pwd = pwd 
-        else: 
-            obs['pwd_changed'] = 0.0 
+            obs['pwd_changed'] = 1.0
+            self.pwd = pwd
+        else:
+            obs['pwd_changed'] = 0.0
 
-        if (pwd_hash := obs.get('Password Hash')) and pwd_hash != self.pwd_hash: 
-            obs['pwd_hash_changed'] = 1.0 
-            self.pwd_hash = pwd_hash 
-        else: 
-            obs['pwd_hash_changed'] = 0.0 
+        if (pwd_hash := obs.get('Password Hash')) and pwd_hash != self.pwd_hash:
+            obs['pwd_hash_changed'] = 1.0
+            self.pwd_hash = pwd_hash
+        else:
+            obs['pwd_hash_changed'] = 0.0
 
         return super().parse_observation(obs)
-    
+
 class InterfaceNode(Node):
     '''
     No features
@@ -270,12 +275,12 @@ class InterfaceNode(Node):
     feats = OrderedDict()
     dims = []
     dim = 0
-    
+
     def __init__(self, uuid: int, observation: dict=dict()):
         '''
         No need to provide input dict (but just in case keep it optional)
         '''
-        self.uuid = uuid 
+        self.uuid = uuid
 
 class SubnetNode(InterfaceNode):
     '''
@@ -291,10 +296,10 @@ class GroupNode(Node):
             [('Builtin Group', None)],
         )
         self.dims = [len(Enums.BuiltInGroups.__members__)]
-        self.dim = self.dims[0]    
-        
+        self.dim = self.dims[0]
+
         super().__init__(uuid, observation)
-    
+
 
 class ConnectionNode(Node):
     def __init__(self, uuid: int, observation: dict=None, suspicious_pid: bool=False, is_decoy: bool=False):
@@ -303,7 +308,7 @@ class ConnectionNode(Node):
             is_decoy=float(is_decoy)
         )
         self.dims = [1,1]
-        self.dim = 2 
+        self.dim = 2
 
         self.labels = ['suspicious pid', 'is decoy']
 
