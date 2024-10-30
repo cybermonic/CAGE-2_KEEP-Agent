@@ -319,6 +319,11 @@ class ObservationGraph:
                     if 'remote_address' not in conn or 'remote_port' not in conn:
                         continue
 
+                    # Ignores IP addresses that aren't in the network. Workaround for
+                    # Vandy emu, but shouldn't affect anything
+                    if conn['remote_address'] not in self.ip_map:
+                        continue
+
                     remote_host = self.ip_map[conn['remote_address']]
                     remote_id = self.nids[remote_host]
 
