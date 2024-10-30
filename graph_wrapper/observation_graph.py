@@ -312,6 +312,13 @@ class ObservationGraph:
                         raise ValueError()
 
                     conn = conn[0]
+
+                    # If no remote details, assume it's just an open port with
+                    # no incoming comms at this time: ignore
+                    # (Quirk of Vanderbilt env, but won't affect other envs)
+                    if 'remote_address' not in conn or 'remote_port' not in conn:
+                        continue
+
                     remote_host = self.ip_map[conn['remote_address']]
                     remote_id = self.nids[remote_host]
 
