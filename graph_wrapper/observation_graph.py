@@ -114,10 +114,11 @@ class ObservationGraph:
     }
     DECOYS = DECOY_TO_PORT.keys()
 
-    def __init__(self, last_analyzed_feat=False):
+    def __init__(self, last_analyzed_feat=False, crown_jewels=['Op_Server']):
         self.nids = NodeTracker()
         self.nodes = dict()
         self.last_analyzed_feat = last_analyzed_feat
+        self.crown_jewels = crown_jewels
 
     def setup(self, initial_observation: dict):
         '''
@@ -194,8 +195,10 @@ class ObservationGraph:
             hosts.append(nid)
             hostnames.append(hostname)
 
-            if 'Op_Server' in hostname:
-                crown_jewel = True
+            for cj in self.crown_jewels:
+                if cj in hostname:
+                    crown_jewel = True
+                    break
             else:
                 crown_jewel = False
 

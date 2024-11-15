@@ -13,43 +13,67 @@
 
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
+import json
 
 import torch
-from Agents.KryptowireAgents.Utility import utils
 from CybORG.Shared.Actions import *
 
 from graph_wrapper.observation_graph import ObservationGraph
+import graph_wrapper.utils as utils
+
 
 class GraphWrapper:
-    def __init__(self, env, action_space):
+    # In order of trained model expected output
+    ACTIONS = [
+        Analyse, Remove,
+        DecoyApache, DecoyFemitter, DecoyHarakaSMPT, DecoySmss,
+        DecoySSHD, DecoySvchost, DecoyTomcat, DecoyVsftpd,
+        Restore,
+    ]
+    HOSTNAMES = [] # Filled in by self.reset()
+
+    def __init__(self, env, action_space, version, write_obs=False):
         # Need to keep the original environment before wrapping it
         self.original_env = env
-        self.graph = ObservationGraph()
+
+        if version == 'v5':
+            crown_jewels = ['Op_Auth', 'Op_Database']
+        else:
+            crown_jewels = ['Op_Server']
+
+        self.graph = ObservationGraph(crown_jewels=crown_jewels)
+        self.crown_jewels = crown_jewels
         self.table = None
+        self.write_obs = write_obs
 
         self.env = env
         self.possible_actions = []
+        self.action_space = action_space
+        self.action_mapping = utils.build_action_map_dict(action_space, self.ACTIONS)
 
-        # Minus 1 because one key is 'success': True
-        for i in range(len(action_space)-1):
-            self.possible_actions.append(
-                utils.map_action(i, action_space)
-            )
-
-        self.step_counter = None
+        self.step_counter = 0
         self.last_obs = None
 
     def step(self, action=None):
+        self.step_counter += 1
+
         # NOTE: return type is now dict instead of tuple
-        action = Sleep() if action is None else self.possible_actions[action]
-        result_dict = self.env.step(action)
+        action_obj = Sleep() if action is None else self.to_action_object(action)
+        result_dict = self.env.step(action_obj)
+
+        if self.write_obs:
+            out_dict = {k:result_dict[k] for k in ['reward', 'observation']}
+            out_dict['action'] = str(action)
+            with open(f'obs_{self.step_counter}.json', 'w+') as f:
+                f.write(json.dumps(out_dict, default=lambda x : str(x), indent=1))
+
         dict_obs = result_dict['observation']
 
         # Tell tabular what happened and update
-        tabular_obs = self.table.observation_change(dict_obs, action)
+        tabular_obs = self.table.observation_change(dict_obs, action_obj)
 
         # Tell ObservationGraph what happened and update
-        self.graph.parse_observation(action, dict_obs)
+        self.graph.parse_observation(action_obj, dict_obs)
 
         # Get graph data/update the state of the graph
         x,ei = self.graph.get_state()
@@ -62,20 +86,37 @@ class GraphWrapper:
         result_dict['observation'] = (x,ei)
         return result_dict
 
-    def reset(self):
+    def reset(self, obs=None):
+        self.step_counter = 0
+
         # Reset tabular data
-        obs = self.env.reset()['observation']
+        if obs is None:
+            obs = self.env.reset()['observation']
+
+        if self.write_obs:
+            out_dict = {'observation': {k:obs[k] for k in obs.keys()}}
+            out_dict['action'] = 'N/a'
+            out_dict['reward'] = 'N/a'
+
+            with open(f'{self.write_obs}-obs_{self.step_counter}.json', 'w+') as f:
+                f.write(json.dumps(out_dict, default=lambda x : str(x), indent=1))
+
         self.table = utils.BlueTable(init_obs = obs)
         tab_x = self.table.observation_change(obs, None)
 
         # Reset graph
-        self.graph = ObservationGraph()
+        self.graph = ObservationGraph(crown_jewels=self.crown_jewels)
         self.graph.setup(obs)
         graph_x, ei = self.graph.get_state()
 
         # Combine observations
         x = self._combine_data(graph_x, tab_x)
         self.last_obs = (x,ei)
+
+        # Get new topology (if needed)
+        self.HOSTNAMES = self.graph.hostnames
+        action_space = self.env.action_mapping({"agent": "Blue"})
+        self.action_mapping = utils.build_action_map_dict(action_space, self.ACTIONS)
 
         # Again, need to change return type to dict
         return {
@@ -90,15 +131,12 @@ class GraphWrapper:
         return torch.cat([graph_x, additional_data], dim=1)
 
     def to_action_object(self, action):
-        return self.possible_actions[action]
+        if action is None:
+            return None
 
-
-class InductiveGraphWrapper(GraphWrapper):
-    ACTIONS = [
-        Analyse, Remove, DecoyApache, DecoyFemitter, DecoyHarakaSMPT, DecoySmss,
-        DecoySSHD, DecoySvchost, DecoyTomcat, DecoyVsftpd, Restore,
-    ]
-    HOSTNAMES = [] # Filled in by self.reset()
+        target = self.HOSTNAMES[action // len(self.ACTIONS)]
+        act = self.ACTIONS[action % len(self.ACTIONS)]
+        return act(hostname=target, agent='Blue', session=0)
 
     def action_translator(self, action):
         '''
@@ -112,20 +150,8 @@ class InductiveGraphWrapper(GraphWrapper):
         if action is None:
             return None
 
-        target = action // len(self.ACTIONS)
-        act = action % len(self.ACTIONS)
-        act_id = act * len(self.HOSTNAMES) + target + 2
+        target = self.HOSTNAMES[action // len(self.ACTIONS)]
+        act = self.ACTIONS[action % len(self.ACTIONS)]
+        act_id = self.action_mapping[act][target]
+
         return act_id
-
-    def step(self, action=None, include_names=False, include_success=False):
-        action = self.action_translator(action)
-        return super().step(action, include_names, include_success)
-
-    def reset(self):
-        ret = super().reset()
-        self.HOSTNAMES = self.graph.hostnames
-        return ret
-
-    def to_action_object(self, action):
-        act_id = self.action_translator(action)
-        return super().to_action_object(act_id)
